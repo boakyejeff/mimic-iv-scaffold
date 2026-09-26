@@ -213,3 +213,97 @@ def test_baseline_beats_chance():
     assert 0.0 <= res.brier <= 0.5  # Brier sanity bound
     prob_true, prob_pred = model.calibration(clf, X_mat[te], y[te])
     assert len(prob_true) == len(prob_pred) > 0
+
+
+# ---------------------------------------------------------------------------
+# Richer generator: reproducibility, marginal calibration, bounds
+# ---------------------------------------------------------------------------
+
+def test_generator_reproducible_with_seed():
+    t1 = synthetic.make_tables(n_patients=50, seed=123)
+    t2 = synthetic.make_tables(n_patients=50, seed=123)
+    assert set(t1) == set(t2)
+    for key in t1:
+        pd.testing.assert_frame_equal(
+            t1[key].reset_index(drop=True), t2[key].reset_index(drop=True),
+            check_dtype=False)
+
+
+def test_target_admissions_size():
+    t = synthetic.make_tables(seed=5, target_admissions=1000)
+    n = len(t[("hosp", "admissions")])
+    assert 990 <= n <= 1000, f"expected ~1000 admissions, got {n}"
+
+
+def test_marginal_calibration_spot_checks():
+    # calibrated to published MIMIC-IV marginals; see docs/CALIBRATION.md
+    t = synthetic.make_tables(n_patients=3000, seed=7)
+    c = synthetic.make_cohort(t)
+    labeled = labels.add_readmission_label(c, t[("hosp", "admissions")])
+    prev = labels.label_prevalence(labeled)
+    assert 0.09 <= prev <= 0.16, f"readmission prevalence {prev} off target"
+    assert 52 <= c["anchor_age"].mean() <= 66, "mean age off target"
+    f_share = (c["gender"] == "F").mean()
+    assert 0.45 <= f_share <= 0.60, f"female share {f_share} off target"
+    icu_share = c["stay_id"].notna().mean()
+    assert 0.08 <= icu_share <= 0.30, f"ICU share {icu_share} off target"
+    los = (c["dischtime"] - c["admittime"]).dt.total_seconds() / 86400
+    assert 3.0 <= los.mean() <= 6.5, f"mean LOS {los.mean()} off target"
+
+
+def test_physiologic_bounds_respected():
+    t = synthetic.make_tables(n_patients=300, seed=11)
+    labs = t[("hosp", "labevents")]
+    ce = t[("icu", "chartevents")]
+    sodium = labs.loc[labs["itemid"] == 50983, "valuenum"]
+    assert ((sodium >= 110) & (sodium <= 165)).all()
+    creat = labs.loc[labs["itemid"] == 50912, "valuenum"]
+    assert ((creat >= 0.2) & (creat <= 15.0)).all()
+    spo2 = ce.loc[ce["itemid"] == 220277, "valuenum"]
+    assert ((spo2 >= 80) & (spo2 <= 100)).all()
+    hr = ce.loc[ce["itemid"] == 220045, "valuenum"]
+    assert ((hr >= 20) & (hr <= 220)).all()
+
+
+def test_missingness_present_and_subgroup_columns_available():
+    t = synthetic.make_tables(n_patients=200, seed=3)
+    c = synthetic.make_cohort(t)
+    X = features.build_feature_matrix(c, t[("hosp", "labevents")],
+                                      t[("icu", "chartevents")])
+    # per-variable missingness: anion_gap has the highest miss rate
+    anion_cols = [col for col in X.columns if "anion_gap" in col]
+    assert anion_cols, "expected anion_gap lab features"
+    assert X[anion_cols].isna().any().any(), "expected some missing anion_gap"
+    # ICU-less admissions produce NaN vital features
+    vital_cols = [col for col in X.columns if col.startswith("vital_")]
+    assert X[vital_cols].isna().any().any(), "expected NaN vitals for ICU-less admissions"
+    # subgroup columns present; all three age bands populated
+    assert X["anchor_age"].notna().all()
+    bands = pd.cut(X["anchor_age"], bins=[0, 65, 80, 200],
+                   labels=["<65", "65-79", "80+"])
+    assert set(bands.unique()) == {"<65", "65-79", "80+"}
+    assert {"gender_F", "gender_M"} <= set(X.columns)
+
+
+def test_ece_and_subgroup_metrics_sane():
+    t = synthetic.make_tables(n_patients=400, seed=9)
+    c = synthetic.make_cohort(t)
+    X = _labeled_matrix(t, c)
+    X_mat, y, groups, _ = model.prepare_xy(X)
+    tr, te = model.grouped_split(X_mat, y, groups, random_state=9)
+    clf = model.train_logreg(X_mat[tr], y[tr])
+    res = model.evaluate(clf, X_mat[te], y[te])
+    assert 0.0 <= res.ece <= 0.5, f"ECE {res.ece} out of bounds"
+    proba = clf.predict_proba(X_mat[te])[:, 1]
+    genders = ["F" if v == 1 else "M" for v in X["gender_F"].to_numpy()[te]]
+    sg = model.subgroup_metrics(y[te], proba,
+                                X["anchor_age"].to_numpy()[te], genders)
+    assert set(sg) == {"age_<65", "age_65-79", "age_80+", "sex_F", "sex_M"}
+    for name, m in sg.items():
+        assert m["n"] > 0, f"empty subgroup {name}"
+        if m["auroc"] is not None:
+            assert 0.0 <= m["auroc"] <= 1.0
+            assert 0.0 <= m["ece"] <= 1.0
+    curve = model.reliability_curve_data(y[te], proba)
+    assert len(curve["bin_centers"]) == 10
+    assert sum(curve["counts"]) == len(y[te])

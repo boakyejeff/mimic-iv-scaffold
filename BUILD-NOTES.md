@@ -76,7 +76,40 @@ application → sign the MIMIC-IV v3.1 DUA. Then run
 cohort counts vs published v3.1 scale (~364,627 patients / ~546,028
 hospitalizations / ~94,458 ICU stays).
 
-## Local git
+## Improvement round (2026-09-26)
+
+**Richer calibrated synthetic generator** (`src/synthetic.py` rewritten):
+
+- Vectorized generation; seeded and fully reproducible (`make_tables`
+  with the same seed returns identical tables; new `target_admissions`
+  parameter for fixed-size cohorts).
+- Calibrated to published MIMIC-IV marginals — full table in
+  `docs/CALIBRATION.md`: 30-day readmission ~12.5% (tuned by bisection
+  so the *realized label* hits the target; between 8.7% 30-day ICU
+  readmission — Momenzadeh et al., Sci Rep 2026 — and 17.6% in a
+  critically-ill HF MIMIC-IV v3.1 cohort — Odoeke et al., Cureus 2026);
+  age mean 58.8 / 52.2% female / insurance mix / LOS mean 4.5 d
+  (Johnson et al., Sci Data 2023); comorbidity prevalences
+  (diabetes ~19.3%, CHF ~12.3%, renal ~12.5%, chronic pulmonary ~14.6%)
+  from the medicalcoder paper (JAMIA Open 2026); vitals/labs as
+  plausible clinical ranges marked as design choices.
+- Latent risk drives physiology + utilization + readmission + mortality;
+  per-variable missingness (2–18%); ICU-less admissions keep NaN vitals.
+- New `calibration_summary()` helper reports realized vs target marginals.
+
+**Model comparison** (`scripts/run_model_comparison.py`, new): 6 variants
+(logreg, logreg+Platt, logreg+isotonic, LightGBM, LightGBM+Platt,
+LightGBM+isotonic) on a fixed 20k-admission cohort (seed 42),
+grouped-by-patient split. Metrics: AUROC, AUPRC, Brier, ECE, reliability
+curves, age-band/sex subgroups → `results/metrics.json` + README tables.
+ALL synthetic; subgroup gaps reflect generator assumptions, not real
+disparities.
+
+**Tests:** 20/20 pass (14 original untouched + 6 new: reproducibility,
+target-admissions sizing, marginal calibration spot-checks, physiologic
+bounds, missingness/subgroup columns, ECE/subgroup/reliability sanity).
+
+**Local git**
 
 `git init` done; nothing committed or pushed (no auth available, and no
 push was requested). Suggested first commit by the user after review.
