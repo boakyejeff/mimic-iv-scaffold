@@ -1,5 +1,6 @@
 # MIMIC-IV Readmission Prediction — Pipeline Scaffold
 
+![Project cover](assets/cover.png)
 > **⚠️ SCAFFOLD — PENDING CREDENTIALING.**
 > This repo is a complete, runnable pipeline *skeleton*. It contains **no
 > MIMIC-IV data** and cannot download any: access requires PhysioNet
